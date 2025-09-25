@@ -145,3 +145,98 @@ class BootsUK(Adapter):
         return None
 
 ADAPTERS = {"UK": [SephoraUK(), SpaceNK(), BootsUK()]}
+
+# ---------------- Lookup core ----------------
+def lookup_rrp(ean: Optional[str], product: str, market: str, throttle: float) -> Optional[Tuple[float, str, str]]:
+    adapters = ADAPTERS.get(market, [])
+    if not adapters:
+        return None
+    query = product
+    if isinstance(ean, str) and ean.strip():
+        query = f"{product} {ean}"
+    for adapter in adapters:
+        links = adapter.search(query)
+        for url in links:
+            try:
+                res = adapter.parse(url, ean, product)
+            except Exception:
+                res = None
+            if res:
+                price, src = res
+                return price, ("GBP" if market == "UK" else ""), src
+        if throttle:
+            time.sleep(throttle)
+    return None
+
+# ---------------- UI ----------------
+st.set_page_config(page_title="RRP Lookup Tool", layout="wide")
+st.title("RRP Lookup Tool")
+
+st.write("Upload an Excel/CSV with **EAN** and/or **Product** columns. Pick a market. Get RRPs with source links back.")
+
+colA, colB = st.columns([2,1])
+with colB:
+    market = st.selectbox("Target Market", options=list(ADAPTERS.keys()), index=0)
+    throttle = st.slider("Delay between retailer requests (seconds)", 0.0, 2.0, THROTTLE_DEFAULT, 0.1)
+
+with colA:
+    upl = st.file_uploader("Upload Excel or CSV", type=["xlsx","xls","csv"])
+
+if upl is not None:
+    if upl.name.lower().endswith(".csv"):
+        df = pd.read_csv(upl)
+    else:
+        df = pd.read_excel(upl)
+
+    cols = list(df.columns)
+    ean_col = None
+    prod_col = None
+    for c in cols:
+        if norm(c) in ("ean","barcode","gtin"):
+            ean_col = c
+        if norm(c) in ("product","name","title","description"):
+            prod_col = c
+    if prod_col is None and len(cols) >= 2:
+        prod_col = cols[1]
+    if ean_col is None and len(cols) >= 1:
+        ean_col = cols[0]
+
+    st.write(f"Detected columns → EAN: **{ean_col}**, Product: **{prod_col}**")
+
+    if st.button("Run Lookup"):
+        out = df.copy()
+        out["RRP"] = None
+        out["Currency"] = None
+        out["Source URL"] = None
+        out["Pulled At"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        progress = st.progress(0.0, text="Looking up RRPs…")
+        n = len(out)
+        for i, row in out.iterrows():
+            ean = str(row.get(ean_col, "")) if ean_col else ""
+            product = str(row.get(prod_col, "")) if prod_col else ""
+            if product or ean:
+                res = lookup_rrp(ean, product, market, throttle)
+                if res:
+                    price, curr, src = res
+                    out.at[i, "RRP"] = price
+                    out.at[i, "Currency"] = curr
+                    out.at[i, "Source URL"] = src
+            progress.progress((i+1)/max(1,n), text=f"Processed {i+1}/{n}")
+
+        st.success("Lookup complete.")
+        bio = io.BytesIO()
+        if upl.name.lower().endswith((".xlsx",".xls")):
+            with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+                out.to_excel(writer, index=False)
+            st.download_button("Download results (.xlsx)", data=bio.getvalue(),
+                               file_name="rrp_results.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        else:
+            csv = out.to_csv(index=False).encode("utf-8")
+            st.download_button("Download results (.csv)", data=csv,
+                               file_name="rrp_results.csv", mime="text/csv")
+
+        st.dataframe(out, use_container_width=True)
+else:
+    st.info("Upload a file to begin. Name columns EAN / Product where possible.")
