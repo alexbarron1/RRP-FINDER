@@ -2,5 +2,9 @@ streamlit
 pandas
 openpyxl
 requests
+streamlit
+pandas
+openpyxl
+requests
 beautifulsoup4
 lxml
